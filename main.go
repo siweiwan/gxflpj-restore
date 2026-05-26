@@ -128,10 +128,8 @@ func main() {
 	}
 
 	cmd := exec.Command(mysqlPath, cmdArgs...)
-	// 将 SQL 文件流直接对接给 mysql 命令的 Stdin (标准输入)
 	cmd.Stdin = sqlFile
 
-	// 捕获可能产生的错误输出
 	var errLog strings.Builder
 	cmd.Stderr = &errLog
 
@@ -140,7 +138,7 @@ func main() {
 
 	startTime := time.Now()
 
-	// 运行状态滚动指示，防止误以为卡死
+	// 运行状态滚动指示
 	done := make(chan struct{})
 	go func() {
 		spin := []string{"|", "/", "-", "\\"}
@@ -160,19 +158,42 @@ func main() {
 
 	err = cmd.Run()
 	close(done)
-	fmt.Print("\r") // 清除滚动指示行
-	if err != nil {
-		exec.Command(mysqlPath, "-h", host, "-P", port, "-u", user, "-p"+password, "-e",
-			"SET GLOBAL log_bin_trust_function_creators = 0;").Run()
-		fmt.Printf("❌ 导入失败！\n错误详情: %v\n控制台输出: %s\n", err, errLog.String())
-		return
-	}
+	fmt.Print("\r")
 
-	// 导入完成后恢复安全设置
+	// 恢复安全设置
 	exec.Command(mysqlPath, "-h", host, "-P", port, "-u", user, "-p"+password, "-e",
 		"SET GLOBAL log_bin_trust_function_creators = 0;").Run()
 
-	fmt.Printf("🎉 恭喜！数据顺利导入成功！\n")
+	stderrOutput := errLog.String()
+	logPath := filepath.Join(filepath.Dir(exePath), "restore_errors.log")
+
+	if err != nil {
+		fmt.Printf("❌ 导入中断！\n错误详情: %v\n", err)
+		if stderrOutput != "" {
+			fmt.Printf("MySQL 输出:\n%s\n", stderrOutput)
+			os.WriteFile(logPath, []byte(stderrOutput), 0644)
+			fmt.Printf("📝 错误日志: %s\n", logPath)
+		}
+		return
+	}
+
+	// 过滤密码警告，检查是否有其他错误
+	hasError := false
+	for _, line := range strings.Split(stderrOutput, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.Contains(line, "Using a password on the command line interface can be insecure") {
+			hasError = true
+			break
+		}
+	}
+	if hasError {
+		fmt.Println("⚠️  导入完成，但存在以下错误：")
+		fmt.Println(stderrOutput)
+		os.WriteFile(logPath, []byte(stderrOutput), 0644)
+		fmt.Printf("📝 完整错误日志已保存到: %s\n", logPath)
+	} else {
+		fmt.Printf("🎉 恭喜！数据顺利导入成功！\n")
+	}
 	fmt.Printf("⏱️ 总共耗时: %v\n", time.Since(startTime))
 }
 
